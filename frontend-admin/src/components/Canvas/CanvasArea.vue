@@ -1,36 +1,63 @@
 <template>
   <div class="canvas-area card">
     <div class="canvas-wrapper" ref="wrapperRef" @click.self="clearSelection" @drop="handleDrop" @dragover="handleDragOver">
-      <div class="canvas-container" :style="canvasContainerStyle">
-        <canvas ref="canvasRef" :width="store.canvasPixelWidth" :height="store.canvasPixelHeight" class="export-canvas" />
-        <div class="edit-area">
-          <div 
-            v-for="element in visibleElements" 
-            :key="element.id"
-            class="canvas-element"
-            :class="{ selected: isSelected(element.id), 'multi-selected': isMultiSelected(element.id) }"
-            :style="getElementStyle(element)"
-            @mousedown="handleElementMouseDown($event, element)"
-            @dblclick="handleDoubleClick(element)"
-          >
-            <component :is="getElementComponent(element.type)" :element="element" :ref="el => setElementRef(element.id, el)" />
-            <div v-if="isSelected(element.id)" class="resize-handles">
-              <div v-for="handle in resizeHandles" :key="handle" :class="['resize-handle', handle]" @mousedown.stop="startResize($event, element, handle)" />
+      <div class="canvas-stage">
+        <div class="canvas-scaler" :style="scalerStyle">
+          <div class="canvas-container" :style="canvasContainerStyle">
+            <canvas ref="canvasRef" :width="store.canvasPixelWidth" :height="store.canvasPixelHeight" class="export-canvas" />
+            <div class="edit-area">
+              <div
+                v-for="element in visibleElements"
+                :key="element.id"
+                class="canvas-element"
+                :class="{ selected: isSelected(element.id), 'multi-selected': isMultiSelected(element.id) }"
+                :style="getElementStyle(element)"
+                @mousedown="handleElementMouseDown($event, element)"
+                @dblclick="handleDoubleClick(element)"
+              >
+                <component :is="getElementComponent(element.type)" :element="element" :ref="el => setElementRef(element.id, el)" />
+                <div v-if="isSelected(element.id)" class="resize-handles">
+                  <div v-for="handle in resizeHandles" :key="handle" :class="['resize-handle', handle]" @mousedown.stop="startResize($event, element, handle)" />
+                </div>
+              </div>
             </div>
           </div>
         </div>
       </div>
+
+      <!-- 缩放控制：与顶部工具栏共用 store.scale，始终保持同步 -->
+      <div class="zoom-bar">
+        <el-button-group>
+          <el-button size="small" :disabled="store.scale <= 0.25" title="缩小" @click="zoomOut">
+            <el-icon><ZoomOut /></el-icon>
+          </el-button>
+          <el-button size="small" class="zoom-value" title="重置为 100%" @click="resetView">
+            {{ Math.round(store.scale * 100) }}%
+          </el-button>
+          <el-button size="small" :disabled="store.scale >= 4" title="放大" @click="zoomIn">
+            <el-icon><ZoomIn /></el-icon>
+          </el-button>
+        </el-button-group>
+        <el-button size="small" title="适应当前窗口" @click="fitView">
+          <el-icon><Rank /></el-icon>
+        </el-button>
+      </div>
+
+      <!-- 画布尺寸 / 缩放比例 / 可滚动区域 的直观视图 -->
+      <CanvasMinimap :wrapper-ref="wrapperRef" />
     </div>
     <div class="canvas-info">
-      <span>画布: {{ store.canvasWidth }}mm × {{ store.canvasHeight }}mm</span>
-      <span>像素: {{ store.canvasPixelWidth }} × {{ store.canvasPixelHeight }} px</span>
-      <span class="tip">提示: Ctrl+点击多选元件</span>
+      <span>{{ store.canvasWidth }}×{{ store.canvasHeight }}mm</span>
+      <span>{{ store.canvasPixelWidth }}×{{ store.canvasPixelHeight }}px</span>
+      <span>{{ Math.round(store.scale * 100) }}% · 显示 {{ scaledCanvasWidth }}×{{ scaledCanvasHeight }}px</span>
+      <span>滚动区 {{ scrollMetrics.width }}×{{ scrollMetrics.height }}px · ({{ scrollMetrics.left }},{{ scrollMetrics.top }})</span>
+      <span class="tip">Ctrl+点击多选</span>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useCanvasStore } from '@/stores/canvas'
 import TextElement from './elements/TextElement.vue'
 import RectElement from './elements/RectElement.vue'
@@ -40,6 +67,7 @@ import ImageElement from './elements/ImageElement.vue'
 import BarcodeElement from './elements/BarcodeElement.vue'
 import QrcodeElement from './elements/QrcodeElement.vue'
 import TableElement from './elements/TableElement.vue'
+import CanvasMinimap from './CanvasMinimap.vue'
 import JsBarcode from 'jsbarcode'
 import QRCode from 'qrcode'
 import { ElMessage } from 'element-plus'
@@ -50,6 +78,9 @@ const wrapperRef = ref(null)
 const elementRefs = ref({})
 
 const resizeHandles = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
+const scales = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4]
+// 画布外留白，缩放后留白区域也属于可滚动范围，保证整块画布都能滚到
+const CANVAS_PADDING = 24
 let isDragging = false
 let isResizing = false
 let dragStartX = 0
@@ -60,8 +91,19 @@ let elementStartW = 0
 let elementStartH = 0
 let currentHandle = ''
 let currentElementId = null
+// 程序化切换缩放/尺寸时跳过“以视口中心为锚点”的默认滚动逻辑
+let skipAnchor = false
 
 const visibleElements = computed(() => store.elements.filter(el => el.visible))
+
+const scaledCanvasWidth = computed(() => Math.round(store.canvasPixelWidth * store.scale))
+const scaledCanvasHeight = computed(() => Math.round(store.canvasPixelHeight * store.scale))
+
+// 外层占据缩放后的真实布局尺寸，使滚动条的可滚动范围与视觉画布一致
+const scalerStyle = computed(() => ({
+  width: `${scaledCanvasWidth.value}px`,
+  height: `${scaledCanvasHeight.value}px`
+}))
 
 const canvasContainerStyle = computed(() => ({
   width: `${store.canvasPixelWidth}px`,
@@ -69,6 +111,144 @@ const canvasContainerStyle = computed(() => ({
   transform: `scale(${store.scale})`,
   transformOrigin: 'top left'
 }))
+
+// 可滚动区域信息（供底部信息栏展示）
+const scrollMetricsTrigger = ref(0)
+const scrollMetrics = computed(() => {
+  void scrollMetricsTrigger.value
+  const w = wrapperRef.value
+  if (!w) return { width: 0, height: 0, left: 0, top: 0 }
+  return {
+    width: w.scrollWidth,
+    height: w.scrollHeight,
+    left: w.scrollLeft,
+    top: w.scrollTop
+  }
+})
+let metricsRaf = 0
+const scheduleMetricsUpdate = () => {
+  if (metricsRaf) return
+  metricsRaf = requestAnimationFrame(() => { metricsRaf = 0; scrollMetricsTrigger.value++ })
+}
+
+// 返回画布内容原点相对滚动区左上的位置（含 wrapper padding 与居中边距）
+const getContentOrigin = () => {
+  const w = wrapperRef.value
+  const scaler = w?.querySelector('.canvas-scaler')
+  if (!w || !scaler) return { x: CANVAS_PADDING, y: CANVAS_PADDING }
+  return {
+    x: scaler.getBoundingClientRect().left - w.getBoundingClientRect().left + w.scrollLeft,
+    y: scaler.getBoundingClientRect().top - w.getBoundingClientRect().top + w.scrollTop
+  }
+}
+
+// 缩放时以视口中心的画布点为锚点调整滚动位置，保证来回缩放视图一致
+watch(() => store.scale, (newScale, oldScale) => {
+  if (skipAnchor || !newScale || !oldScale) return
+  const w = wrapperRef.value
+  if (!w) return
+  // watcher 在 DOM 更新前触发，此时读到的是旧布局
+  const oldScrollLeft = w.scrollLeft
+  const oldScrollTop = w.scrollTop
+  const viewW = w.clientWidth
+  const viewH = w.clientHeight
+  const oldOrigin = getContentOrigin()
+  const oldCanvasW = store.canvasPixelWidth * oldScale
+  const oldCanvasH = store.canvasPixelHeight * oldScale
+
+  requestAnimationFrame(() => {
+    if (skipAnchor) return
+    const ratio = newScale / oldScale
+    const newCanvasW = oldCanvasW * ratio
+    const newCanvasH = oldCanvasH * ratio
+    // 内容原点：溢出时为 stage padding；小于视口时为居中边距 (viewport-canvas)/2
+    const originX = Math.max(CANVAS_PADDING, (viewW - newCanvasW) / 2)
+    const originY = Math.max(CANVAS_PADDING, (viewH - newCanvasH) / 2)
+    // 视口中心对应的旧画布坐标
+    const centerCanvasX = oldScrollLeft + viewW / 2 - oldOrigin.x
+    const centerCanvasY = oldScrollTop + viewH / 2 - oldOrigin.y
+    w.scrollTo({
+      left: originX + centerCanvasX * ratio - viewW / 2,
+      top: originY + centerCanvasY * ratio - viewH / 2
+    })
+    scheduleMetricsUpdate()
+  })
+})
+
+// 画布尺寸变化后把滚动位置限制在新范围内，并刷新滚动信息
+watch(() => [store.canvasPixelWidth, store.canvasPixelHeight], () => {
+  requestAnimationFrame(() => { clampScroll(); scheduleMetricsUpdate() })
+})
+
+const clampScroll = () => {
+  const w = wrapperRef.value
+  if (!w) return
+  w.scrollTo({
+    left: Math.min(w.scrollLeft, Math.max(0, w.scrollWidth - w.clientWidth)),
+    top: Math.min(w.scrollTop, Math.max(0, w.scrollHeight - w.clientHeight))
+  })
+}
+
+const zoomIn = () => {
+  const next = scales.find(s => s > store.scale + 1e-9)
+  if (next !== undefined) store.setScale(next)
+}
+const zoomOut = () => {
+  const smaller = scales.filter(s => s < store.scale - 1e-9)
+  if (smaller.length) store.setScale(smaller[smaller.length - 1])
+}
+
+// 回到初始视图：100% 缩放、滚动位置回到左上角
+const resetView = () => {
+  skipAnchor = true
+  store.setScale(1)
+  requestAnimationFrame(() => {
+    wrapperRef.value?.scrollTo({ left: 0, top: 0 })
+    scheduleMetricsUpdate()
+    requestAnimationFrame(() => { skipAnchor = false })
+  })
+}
+
+// 适应当前窗口：整块画布都可见且居中
+const fitView = () => {
+  const w = wrapperRef.value
+  if (!w) return
+  const fit = Math.min(
+    (w.clientWidth - CANVAS_PADDING * 2) / store.canvasPixelWidth,
+    (w.clientHeight - CANVAS_PADDING * 2) / store.canvasPixelHeight
+  )
+  const target = scales
+    .filter(s => s <= fit)
+    .sort((a, b) => b - a)[0] || scales[0]
+  skipAnchor = true
+  store.setScale(target)
+  requestAnimationFrame(() => {
+    w.scrollTo({
+      left: (w.scrollWidth - w.clientWidth) / 2,
+      top: (w.scrollHeight - w.clientHeight) / 2
+    })
+    scheduleMetricsUpdate()
+    requestAnimationFrame(() => { skipAnchor = false })
+  })
+}
+
+let resizeObserver = null
+onMounted(() => {
+  if (typeof ResizeObserver !== 'undefined' && wrapperRef.value) {
+    resizeObserver = new ResizeObserver(scheduleMetricsUpdate)
+    resizeObserver.observe(wrapperRef.value)
+  } else {
+    window.addEventListener('resize', scheduleMetricsUpdate)
+  }
+  wrapperRef.value?.addEventListener('scroll', scheduleMetricsUpdate, { passive: true })
+  scheduleMetricsUpdate()
+})
+
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect()
+  window.removeEventListener('resize', scheduleMetricsUpdate)
+  wrapperRef.value?.removeEventListener('scroll', scheduleMetricsUpdate)
+})
 
 const componentMap = { text: TextElement, rect: RectElement, circle: CircleElement, line: LineElement, image: ImageElement, barcode: BarcodeElement, qrcode: QrcodeElement, table: TableElement }
 const getElementComponent = (type) => componentMap[type] || 'div'
@@ -175,7 +355,7 @@ const handleDrop = (e) => {
   
   try {
     const item = JSON.parse(data)
-    const container = wrapperRef.value.querySelector('.canvas-container')
+    const container = wrapperRef.value.querySelector('.canvas-scaler')
     const rect = container.getBoundingClientRect()
     let x = (e.clientX - rect.left) / store.scale
     let y = (e.clientY - rect.top) / store.scale
@@ -377,15 +557,57 @@ defineExpose({ exportCanvas })
 .canvas-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
 
 .canvas-wrapper {
+  position: relative;
   flex: 1; overflow: auto; background: #e4e7ed;
   background-image: linear-gradient(45deg, #d0d0d0 25%, transparent 25%), linear-gradient(-45deg, #d0d0d0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d0d0d0 75%), linear-gradient(-45deg, transparent 75%, #d0d0d0 75%);
   background-size: 20px 20px; background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
-  padding: 24px; display: flex; justify-content: flex-start; align-items: flex-start;
 }
 
-.canvas-container { position: relative; background: #fff; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15); overflow: hidden; flex-shrink: 0; }
+/* 留白做在 stage 上（不能做在滚动容器 padding 上：浏览器不会把容器尾部 padding
+   计入可滚动范围）。小画布时 auto margin 居中，溢出时从左上排开且四边均可滚到
+   （也不能用 justify-content: center：溢出时左侧会被裁掉且无法滚到） */
+.canvas-stage {
+  min-width: 100%;
+  min-height: 100%;
+  /* 宽度按内容（含右侧 padding）撑开，否则 flex 容器宽度停在视口宽度、
+     右侧留白不进入可滚动范围；min-width 保证小画布时至少铺满视口用于居中 */
+  width: max-content;
+  box-sizing: border-box;
+  padding: 24px;
+  display: flex;
+}
+
+/* 占据缩放后的真实布局尺寸，是滚动区域的实际内容边界 */
+.canvas-scaler {
+  flex-shrink: 0;
+  margin: auto;
+}
+
+.canvas-container { position: relative; background: #fff; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15); overflow: hidden; }
 .export-canvas { position: absolute; top: 0; left: 0; visibility: hidden; pointer-events: none; }
 .edit-area { position: relative; width: 100%; height: 100%; }
+
+.zoom-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  padding: 4px 8px;
+  z-index: 20;
+
+  .zoom-value {
+    min-width: 56px;
+    font-weight: 600;
+    color: #409eff;
+  }
+}
 
 .canvas-element {
   position: absolute; cursor: move; border: 1px solid transparent; box-sizing: border-box;
@@ -408,7 +630,8 @@ defineExpose({ exportCanvas })
 
 .canvas-info {
   padding: 8px 16px; background: #f5f7fa; border-top: 1px solid #e4e7ed;
-  display: flex; gap: 24px; font-size: 12px; color: #909399;
+  display: flex; flex-wrap: wrap; gap: 6px 24px;
+  font-size: 12px; color: #909399;
   .tip { margin-left: auto; color: #409eff; }
 }
 </style>

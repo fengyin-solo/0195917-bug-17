@@ -2,6 +2,8 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 
 const MM_TO_DOT = 8
+const MIN_CANVAS_MM = 10
+const MAX_CANVAS_MM = 200
 
 export const useCanvasStore = defineStore('canvas', () => {
   const canvasWidth = ref(80)
@@ -24,9 +26,17 @@ export const useCanvasStore = defineStore('canvas', () => {
     return elements.value.filter(el => selectedElementIds.value.includes(el.id))
   })
 
+  function isValidCanvasSize(value) {
+    return typeof value === 'number' && Number.isFinite(value)
+      && value >= MIN_CANVAS_MM && value <= MAX_CANVAS_MM
+  }
+
+  // 返回 true 表示尺寸合法且已应用，false 表示数值被拒绝、画布保持原状
   function setCanvasSize(width, height) {
+    if (!isValidCanvasSize(width) || !isValidCanvasSize(height)) return false
     canvasWidth.value = width
     canvasHeight.value = height
+    return true
   }
 
   function setScale(newScale) {
@@ -183,6 +193,9 @@ export const useCanvasStore = defineStore('canvas', () => {
     alignElements,
     duplicateElement,
     clearCanvas,
-    MM_TO_DOT
+    MM_TO_DOT,
+    MIN_CANVAS_MM,
+    MAX_CANVAS_MM,
+    isValidCanvasSize
   }
 })
