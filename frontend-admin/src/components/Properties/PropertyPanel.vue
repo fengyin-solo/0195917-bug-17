@@ -1,7 +1,40 @@
 <template>
   <div class="property-panel card">
     <div class="section-title">属性设置</div>
-    <div class="property-content" v-if="element">
+    <!-- 未选中元件时：展示画布属性，数值全部取自 store（画布实际大小的唯一数据源），
+         与中间画布、顶部工具栏始终保持一致 -->
+    <div class="property-content" v-if="!element">
+      <div class="property-group">
+        <div class="group-title">画布属性</div>
+        <div class="canvas-meta">
+          <div class="meta-row">
+            <span class="meta-label">宽度</span>
+            <span class="meta-value">{{ store.canvasWidth }} mm</span>
+            <span class="meta-sub">（{{ store.canvasPixelWidth }} dot）</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-label">高度</span>
+            <span class="meta-value">{{ store.canvasHeight }} mm</span>
+            <span class="meta-sub">（{{ store.canvasPixelHeight }} dot）</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-label">缩放</span>
+            <span class="meta-value">{{ Math.round(store.scale * 100) }}%</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-label">元件数</span>
+            <span class="meta-value">{{ store.elements.length }}</span>
+          </div>
+        </div>
+        <div class="canvas-meta-tip">
+          1 mm = {{ store.MM_TO_DOT }} dot<br/>
+          宽高允许范围：{{ store.MIN_CANVAS_SIZE }} ~ {{ store.MAX_CANVAS_SIZE }} mm<br/>
+          修改画布尺寸请在顶部工具栏输入后点击「应用」
+        </div>
+      </div>
+      <el-empty description="画布空白时可从左侧拖入元件" :image-size="80" />
+    </div>
+    <div class="property-content" v-else>
       <el-form label-position="left" label-width="60px" size="small">
         <!-- 通用属性 -->
         <div class="property-group">
@@ -188,7 +221,6 @@
         </div>
       </el-form>
     </div>
-    <el-empty v-else description="请选择元件" :image-size="80" />
   </div>
 </template>
 
@@ -352,6 +384,21 @@ const remove = () => {
 :deep(.el-input) { width: 100%; }
 
 .unit { margin-left: 4px; font-size: 12px; color: #909399; }
+
+.canvas-meta {
+  background: #f5f7fa; border-radius: 4px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+  .meta-row {
+    display: flex; align-items: baseline; gap: 6px; font-size: 13px;
+    .meta-label { color: #909399; width: 40px; flex-shrink: 0; }
+    .meta-value { color: #303133; font-weight: 600; }
+    .meta-sub { color: #c0c4cc; font-size: 12px; }
+  }
+}
+
+.canvas-meta-tip {
+  margin-top: 10px; font-size: 12px; color: #909399; line-height: 1.8;
+}
 
 .image-preview {
   margin-top: 8px; padding: 8px; background: #f5f7fa; border-radius: 4px;
